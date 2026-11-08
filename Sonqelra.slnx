@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Sonqelra.ConsoleApp/Sonqelra.ConsoleApp.csproj" />
+  <Project Path="Sonqelra.Core/Sonqelra.Core.csproj" />
+  <Project Path="Sonqelra.Lang/Sonqelra.Lang.csproj" />
+  <Project Path="Sonqelra.Backends/Sonqelra.Backends.csproj" />
+  <Project Path="Sonqelra.Tests/Sonqelra.Tests.csproj" />
+</Solution>

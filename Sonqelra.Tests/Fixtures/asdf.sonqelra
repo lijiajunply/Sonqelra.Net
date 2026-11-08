@@ -1,0 +1,99 @@
+// Sonqelra 语法设计示例；解析器和编译器尚未实现。
+// 旋律时值以全音符为 1；note/rest 参数以四分音符为 1。
+score "Electric Road" {
+    tempo 140
+    meter 4/4
+    key E minor
+
+    let half = 1/2
+
+    // 失真吉他主奏：每个乐句一小节。
+    melody riff_e {
+        E4:1/8@110
+        E4:1/8@98
+        G4:1/4@105
+        A4:1/8@108
+        B4:1/8@115
+        G4:1/4@100
+    }
+    melody riff_g {
+        G4:1/8@108
+        G4:1/8@96
+        B4:1/4@105
+        D5:1/8@110
+        B4:1/8@100
+        A4:1/4@98
+    }
+    melody riff_a {
+        A4:1/8@110
+        A4:1/8@98
+        C5:1/4@105
+        B4:1/8@100
+        A4:1/8@100
+        G4:1/4@98
+    }
+    melody ending {
+        B4:1/8@110
+        A4:1/8@100
+        G4:1/4@105
+        E4:1/2@118
+    }
+    let lead = (
+        ((riff_e + riff_g + riff_a + riff_e) |> repeat(3))
+        + riff_e + riff_g + riff_a + ending
+    )
+
+    // 八分音符动力和弦，重复一小节。
+    fn power_chord(root: Pitch, fifth: Pitch) -> Music {
+        return (note(root, half, 95) | note(fifth, half, 90)) |> repeat(8)
+    }
+
+    let e5 = power_chord(E3, B3)
+    let g5 = power_chord(G3, D4)
+    let a5 = power_chord(A3, E4)
+    let guitar = (e5 + g5 + a5 + e5) |> repeat(4)
+
+    // 电贝斯用根音与五度推动节奏。
+    fn bass_bar(root: Pitch, fifth: Pitch) -> Music {
+        return (
+            note(root, 1, 100) + note(root, half, 88) + note(fifth, half, 92)
+            + note(root, 1, 98) + note(fifth, half, 90) + note(root, half, 95)
+        )
+    }
+
+    let bass = (
+        bass_bar(E2, B2) + bass_bar(G2, D3)
+        + bass_bar(A2, E3) + bass_bar(E2, B2)
+    ) |> repeat(4)
+
+    // GM 鼓组：C2 底鼓、D2 军鼓、F#2 闭合踩镲。
+    let kick = note(C2, half, 115) + rest(3/2) + note(C2, half, 105) + rest(3/2)
+    let snare = rest(1) + note(D2, half, 112) + rest(3/2) + note(D2, half, 115) + rest(half)
+    let hihat = (note(F#2, half, 75) + note(F#2, half, 62)) |> repeat(4)
+    let drums = (kick | snare | hihat) |> repeat(16)
+
+    track "Lead Guitar" {
+        instrument "Overdriven Guitar"
+        play lead
+    }
+    track "Rhythm Guitar" {
+        instrument "Distortion Guitar"
+        play guitar
+    }
+    track "Bass" {
+        instrument "Electric Bass (pick)"
+        play bass
+    }
+    track "Drums" {
+        instrument "Piano"
+        percussion true
+        play drums
+    }
+
+    // 对应该 score 调用 sonqelra_to_midi(score, "electric_road.mid")。
+    export midi "electric_road.mid"
+}
+
+// WAV 渲染由外部 FluidSynth 完成，当前 Sonqelra API 不提供该能力：
+// fluidsynth -ni -F electric_road.wav -r 44100 \
+//   /Users/luckyfish/Documents/music/GeneralUser-GS-main/GeneralUser-GS.sf2 electric_road.mid
