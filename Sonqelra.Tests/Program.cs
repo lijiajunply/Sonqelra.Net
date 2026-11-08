@@ -93,6 +93,82 @@ var tests = new (string Name, Action Test)[]
 
         Throws<SemanticException>(() => Compiler.CompileSource("score \"x\" {\n melody m {\n rest:1/4@5\n }\n}"));
     }),
+    ("Import formats and nested scripts", () =>
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "sonqelra-import-" + Guid.NewGuid());
+        Directory.CreateDirectory(Path.Combine(dir, "sub"));
+        try
+        {
+            var music = (new Rest(3) + Note.Create("Db4", 2)) | Note.Create("G4", new Rational(1, 3));
+            var score = new Score([new Track(music, "Flute", "Melody")], "Source",
+                new TempoMap([(0, 120), (new Rational(1, 3), 90)]),
+                new MeterMap([(0, new TimeSignature(4, 4)), (4, new TimeSignature(3, 4))]));
+            var xml = Path.Combine(dir, "part.musicxml");
+            MusicXml.Export(score, xml);
+            var imported = MusicXml.Import(xml);
+            string Events(Score s) => string.Join(";", s.Tracks[0].Music.IterEvents()
+                .OrderBy(e => e.Start).ThenBy(e => e.Pitch.Midi).Select(e => $"{e.Start}:{e.Duration}:{e.Pitch.Midi}"));
+            Equal(Events(score), Events(imported));
+            Equal((Rational)90, imported.TempoMap.Tempo[1].Bpm);
+            Equal(3, imported.MeterMap.Meter[1].Signature.Numerator);
+            Midi.Export(score, Path.Combine(dir, "part.mid"));
+            File.WriteAllText(Path.Combine(dir, "sub", "child.sonqelra"), """
+                import midi "../part.mid"
+                score "child" {
+                 let duration = 2
+                 fn make(p: Pitch) -> Music {
+                 return note(p, duration)
+                 }
+                 track "inner" {
+                 instrument "Piano"
+                 play module("part")."part".track."Melody"
+                 }
+                 export midi "ignored.mid"
+                }
+                """);
+            var source = """
+                import sonqelra "sub/child.sonqelra"
+                import musicxml "part.musicxml"
+                score "first" {
+                 fn make(p: Pitch) -> Music {
+                 return note(p, 1)
+                 }
+                 track "local" {
+                 instrument "Piano"
+                 play note(C4, 1)
+                 }
+                }
+                score "combined" {
+                 import score "first"
+                 fn use(p: Pitch) -> Music {
+                 return module('child')."child".fn.make(p)
+                 }
+                 track "new" {
+                  instrument "Piano"
+                  play use(D4) + score("first").fn.make(E4) + module("part")."Source".track."Melody" + score("first").track."local"
+                 }
+                 export midi "result.mid"
+                }
+                """;
+            var result = Compiler.CompileSource(source, Path.Combine(dir, "main.sonqelra"));
+            Equal(1, result.Scores[1].Score.Tracks.Count);
+            var events = result.Scores[1].Score.Tracks[0].Music.IterEvents().ToArray();
+            Equal(62, events[0].Pitch.Midi);
+            Equal((Rational)2, events[0].Duration);
+            Equal(64, events[1].Pitch.Midi);
+            Equal(1, result.Exports.Count);
+            Equal("result.mid", result.Exports[0].Path);
+            var loop = Path.Combine(dir, "loop.sonqelra");
+            File.WriteAllText(loop, "import sonqelra \"loop.sonqelra\"");
+            var error = Throws<SemanticException>(() => Compiler.CompileSource(File.ReadAllText(loop), loop));
+            Equal(1, error.Span.Start.Line);
+            if (!error.Message.Contains("Circular import")) throw new Exception("Expected circular import error");
+            Throws<SemanticException>(() => Compiler.CompileSource("import midi \"x.mid\""));
+            Throws<SemanticException>(() => Compiler.CompileSource("import midi \"missing.mid\"", loop));
+            Throws<SemanticException>(() => Compiler.CompileSource("score \"x\" {\n import score \"missing\"\n}"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }),
     ("MIDI and XML roundtrip", () =>
     {
         var dir = Path.Combine(Path.GetTempPath(), "sonqelra-" + Guid.NewGuid());

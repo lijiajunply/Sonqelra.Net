@@ -5,7 +5,7 @@ using Sonqelra.Core;
 
 namespace Sonqelra.Backends;
 
-public static class MusicXml
+public static partial class MusicXml
 {
     private sealed record Bar(Rational Start, Rational End, TimeSignature Meter, int MeterIndex);
 

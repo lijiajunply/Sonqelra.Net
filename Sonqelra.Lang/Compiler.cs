@@ -1,12 +1,16 @@
 using System.Numerics;
 using System.Text.RegularExpressions;
 using Sonqelra.Core;
+using Sonqelra.Backends;
 
 namespace Sonqelra.Lang;
 
 public sealed record KeySignature(string Root, string Mode);
 
-public sealed record ScoreResult(Score Score, KeySignature? Key);
+public sealed record ScoreResult(Score Score, KeySignature? Key)
+{
+    internal Dictionary<string, Function> Functions { get; init; } = [];
+}
 
 public sealed record ExportPlan(ScoreResult Score, string Path, Span Span, string Format);
 
@@ -104,6 +108,13 @@ public static class Compiler
                 var x = (Music)Require(n, left, "Music");
                 var y = (Music)Require(n, right, "Music");
                 return n.Kind == "+" ? x + y : x | y;
+            case "qualified":
+                var qualified = ResolveQualified(n, env);
+                if (((ValueTuple<string?, string, string, string>)n.Value!).Item3 == "track") return qualified;
+                if (n.Children.Any(node => node.Value != null)) throw Fail(n, "Named arguments are not supported here");
+                var qualifiedEnv = new Dictionary<string, object>(env) { ["__qualified__"] = qualified };
+                return Call(n, "__qualified__", [.. n.Children.Select(node => Evaluate(node.Children[0], env))], [],
+                    qualifiedEnv);
             case "call":
             case "pipe":
                 var name = (string)n.Value!;
@@ -200,8 +211,48 @@ public static class Compiler
         return Require(fn.Node, result, returnType);
     }
 
+    private static object ResolveQualified(Node n, Dictionary<string, object> env)
+    {
+        var (module, title, category, member) = ((string?, string, string, string))n.Value!;
+        ScoreResult? result;
+        if (module == null)
+            result = env.GetValueOrDefault("\0score:" + title) as ScoreResult;
+        else
+        {
+            if (env.GetValueOrDefault("\0module:" + module) is not Dictionary<string, ScoreResult> scores)
+                throw Fail(n, $"Unknown module {module}");
+            result = scores.GetValueOrDefault(title);
+        }
+
+        if (result == null) throw Fail(n, $"Unknown score {title}");
+        if (category == "fn")
+            return result.Functions.GetValueOrDefault(member) ??
+                   throw Fail(n, $"Unknown function {member} in score {title}");
+        var tracks = result.Score.Tracks.Where(t => t.Name == member).ToArray();
+        if (tracks.Length != 1) throw Fail(n, $"Unknown or ambiguous track {member} in score {title}");
+        return tracks[0].Music;
+    }
+
     private static string Infer(Node n, Dictionary<string, object> env)
     {
+        if (n.Kind == "qualified")
+        {
+            var value = ResolveQualified(n, env);
+            if (((ValueTuple<string?, string, string, string>)n.Value!).Item3 == "track") return "Music";
+            var fn = (Function)value;
+            var parameters = fn.Node.Children.TakeWhile(c => c.Kind == "param").ToArray();
+            if (n.Children.Count != parameters.Length) throw Fail(n, "Wrong number of arguments");
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                if (n.Children[i].Value != null) throw Fail(n.Children[i], "Named arguments are not supported here");
+                var expected = ((ValueTuple<string, string>)parameters[i].Value!).Item2;
+                var actualType = Infer(n.Children[i].Children[0], env);
+                if (!Accepts(actualType, expected)) throw Fail(n.Children[i], $"Expected {expected}, got {actualType}");
+            }
+
+            return ((ValueTuple<string, string>)fn.Node.Value!).Item2;
+        }
+
         if (n.Kind == "number")
         {
             var (_, b) = ((BigInteger, BigInteger))n.Value!;
@@ -354,11 +405,75 @@ public static class Compiler
 
     public static CompilationResult CompileSource(string source, string filename = "<string>")
     {
+        var active = new HashSet<string>(OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal);
+        if (filename != "<string>") active.Add(Path.GetFullPath(filename));
+        return CompileSourceInternal(source, filename, active);
+    }
+
+    private static CompilationResult CompileSourceInternal(string source, string filename, HashSet<string> active)
+    {
         var globals = new Dictionary<string, object>();
         var results = new List<ScoreResult>();
         var exports = new List<ExportPlan>();
         foreach (var item in Parser.Parse(source, filename))
         {
+            if (item.Kind == "import")
+            {
+                var (format, importPath) = ((string, string))item.Value!;
+                if (format is not ("midi" or "musicxml" or "sonqelra"))
+                    throw Fail(item, $"Unknown import format: {format}");
+                if (string.IsNullOrEmpty(importPath)) throw Fail(item, "Import path must not be empty");
+                if (!Path.IsPathRooted(importPath) && filename == "<string>")
+                    throw Fail(item, "Relative import requires a source filename");
+                try
+                {
+                    var target = Path.GetFullPath(Path.IsPathRooted(importPath)
+                        ? importPath
+                        : Path.Combine(Path.GetDirectoryName(Path.GetFullPath(filename))!, importPath));
+                    var moduleName = Path.GetFileNameWithoutExtension(target);
+                    var moduleKey = "\0module:" + moduleName;
+                    if (globals.ContainsKey(moduleKey)) throw Fail(item, $"Duplicate module {moduleName}");
+                    IReadOnlyList<ScoreResult> imported;
+                    if (format == "sonqelra")
+                    {
+                        if (!active.Add(target)) throw Fail(item, $"Circular import: {target}");
+                        try
+                        {
+                            imported = CompileSourceInternal(File.ReadAllText(target), target, active).Scores;
+                        }
+                        finally
+                        {
+                            active.Remove(target);
+                        }
+                    }
+                    else
+                        imported =
+                        [
+                            new ScoreResult(format == "midi" ? Midi.Import(target) : MusicXml.Import(target), null)
+                        ];
+
+                    var scores = new Dictionary<string, ScoreResult>();
+                    foreach (var importedResult in imported)
+                        if (!scores.TryAdd(importedResult.Score.Title, importedResult))
+                            throw Fail(item,
+                                $"Duplicate score title {importedResult.Score.Title} in module {moduleName}");
+                    globals.Add(moduleKey, scores);
+                }
+                catch (SonqelraException)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
+                                               or FormatException or ArithmeticException or System.Xml.XmlException)
+                {
+                    throw new SemanticException($"{format} import failed: {ex.Message}", item.Span, ex);
+                }
+
+                continue;
+            }
+
             if (item.Kind == "fn")
             {
                 Declare(item, [], globals);
@@ -459,6 +574,14 @@ public static class Compiler
 
                             tracks.Add(track);
                             break;
+                        case "import":
+                            var (kind, title) = ((string, string))n.Value!;
+                            if (kind != "score") throw Fail(n, "Only import score is allowed inside a score");
+                            var matching = results.Where(r => r.Score.Title == title).ToArray();
+                            if (matching.Length != 1) throw Fail(n, $"Unknown or ambiguous score {title}");
+                            if (!local.TryAdd("\0score:" + title, matching[0]))
+                                throw Fail(n, $"Duplicate score import {title}");
+                            break;
                         case "export": plans.Add(n); break;
                     }
                 }
@@ -476,12 +599,15 @@ public static class Compiler
             var result =
                 new ScoreResult(
                     new Score(tracks, (string)item.Value!, new TempoMap([(0, tempo)]), new MeterMap([(0, meter)])),
-                    key);
+                    key)
+                {
+                    Functions = local.Where(x => x.Value is Function).ToDictionary(x => x.Key, x => (Function)x.Value)
+                };
             results.Add(result);
             foreach (var plan in plans)
             {
                 var (format, path) = ((string, string))plan.Value!;
-                exports.Add(new(result, path, plan.Span, format));
+                exports.Add(new ExportPlan(result, path, plan.Span, format));
             }
         }
 

@@ -72,12 +72,13 @@ public static class Lexer
                 continue;
             }
 
-            if (c == '"')
+            if (c is '"' or '\'')
             {
+                var quote = c;
                 i++;
                 col++;
                 var value = new StringBuilder();
-                while (i < source.Length && source[i] != '"')
+                while (i < source.Length && source[i] != quote)
                 {
                     char ch = source[i];
                     if (ch == '\n') throw new LexException("Unterminated string", new(filename, start, Pos()));
@@ -85,7 +86,7 @@ public static class Lexer
                     {
                         i++;
                         col++;
-                        if (i >= source.Length || !"\\\"nrt".Contains(source[i]))
+                        if (i >= source.Length || !"\\\"'nrt".Contains(source[i]))
                             throw new LexException("Invalid string escape", new(filename, start, Pos()));
                         ch = source[i] switch { 'n' => '\n', 'r' => '\r', 't' => '\t', var x => x };
                     }
@@ -127,7 +128,7 @@ public static class Lexer
                 continue;
             }
 
-            if ("{}()[],:@=+|/<>".Contains(c))
+            if ("{}()[],:@=+|/<>.".Contains(c))
             {
                 i++;
                 col++;
@@ -182,7 +183,7 @@ public sealed class Parser(IReadOnlyList<Token> tokens)
         return new[]
         {
             "score", "tempo", "meter", "key", "melody", "let", "fn", "return", "track", "instrument", "percussion",
-            "play", "export", "midi", "true", "false", "major", "minor", "rest"
+            "play", "export", "import", "midi", "true", "false", "major", "minor", "rest"
         }.Contains(t.Value)
             ? throw new ParseException("Expected identifier", t.Span)
             : t.Value;
@@ -197,8 +198,8 @@ public sealed class Parser(IReadOnlyList<Token> tokens)
         Nl();
         while (!Is("EOF"))
         {
-            items.Add(Is("score") ? Score() :
-                Is("fn") ? Function() : throw new ParseException("Expected score or fn", T.Span));
+            items.Add(Is("score") ? Score() : Is("fn") ? Function() :
+                Is("import") ? Statement("top") : throw new ParseException("Expected score, fn or import", T.Span));
             End();
         }
 
@@ -308,7 +309,7 @@ public sealed class Parser(IReadOnlyList<Token> tokens)
             return Make(k, s, name, items);
         }
 
-        if (k == "export" && context == "score")
+        if ((k == "export" && context == "score") || (k == "import" && context is "score" or "top"))
         {
             Take();
             var format = Take("IDENT").Value;
@@ -491,6 +492,18 @@ public sealed class Parser(IReadOnlyList<Token> tokens)
             return Make("number", s, (a, b));
         }
 
+        if (Is("IDENT") && (s.Value is "module" or "score") && tokens[_i + 1].Kind == "(")
+        {
+            var basis = Take().Value;
+            Take("("); string? module = Take("STRING").Value; Take(")");
+            string title;
+            if (basis == "module") { Take("."); title = Take("STRING").Value; }
+            else { title = module; module = null; }
+            Take("."); var category = Take("IDENT").Value;
+            if (category is not ("fn" or "track")) throw new ParseException("Expected fn or track", T.Span);
+            Take("."); var member = Take(category == "fn" ? "IDENT" : "STRING").Value;
+            return Make("qualified", s, (module, title, category, member), category == "fn" ? Args() : null);
+        }
         if (Is("IDENT"))
         {
             var name = Take().Value;
